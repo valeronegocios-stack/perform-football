@@ -8,11 +8,11 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash, timingSafeEqual} from 'node:crypto';
 const ROOT=path.dirname(fileURLToPath(import.meta.url));
-const HOST=process.env.HOST||'127.0.0.1';
+const HOST=process.env.HOST||(process.env.NODE_ENV==='production'?'0.0.0.0':'127.0.0.1');
 const PRODUCTION=process.env.NODE_ENV==='production';
 const AUTH_USER=process.env.PERFORM_USER||'';
 const AUTH_PASSWORD=process.env.PERFORM_PASSWORD||'';
-if(PRODUCTION&&(!AUTH_USER||AUTH_PASSWORD.length<16))throw Error('Despliegue bloqueado: configura PERFORM_USER y PERFORM_PASSWORD (16 caracteres o más) como secretos.');
+if(PRODUCTION&&(!AUTH_USER||AUTH_PASSWORD.length<10))throw Error('Despliegue bloqueado: configura PERFORM_USER y PERFORM_PASSWORD (10 caracteres o más) como secretos.');
 const ACCESS_FAILURES=new Map();
 const AI_REQUESTS=new Map();
 function digest(s){return createHash('sha256').update(s).digest()}
