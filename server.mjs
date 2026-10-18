@@ -7,6 +7,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash, timingSafeEqual} from 'node:crypto';
+import pg from 'pg';
 const ROOT=path.dirname(fileURLToPath(import.meta.url));
 const HOST=process.env.HOST||(process.env.NODE_ENV==='production'?'0.0.0.0':'127.0.0.1');
 const PRODUCTION=process.env.NODE_ENV==='production';
@@ -39,12 +40,53 @@ const PORT=Number(process.env.PORT||4173);
 const MODEL=process.env.OPENAI_MODEL||'gpt-4.1-mini';
 const KEY=process.env.OPENAI_API_KEY||'';
 const TRANSCRIBE_MODEL=process.env.OPENAI_TRANSCRIPTION_MODEL||'gpt-4o-mini-transcribe';
+// Almacenamiento remoto: UNA cuenta protegida por Basic Auth; datos alojados en PostgreSQL.
+// Preparado para ampliar a identidad individual en futuras versiones.
+const DATABASE_URL=process.env.DATABASE_URL||'';
+const pool=DATABASE_URL?new pg.Pool({connectionString:DATABASE_URL,max:4,idleTimeoutMillis:15000,connectionTimeoutMillis:6000}):null;
+async function initDatabase(){if(!pool)return;await pool.query(`
+ CREATE TABLE IF NOT EXISTS pf_state (
+   account_key TEXT PRIMARY KEY CHECK (account_key='principal'),
+   revision BIGINT NOT NULL DEFAULT 0 CHECK (revision>=0),
+   snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+ )`);}
+function safeSnapshot(s){
+ if(!s||typeof s!=='object'||Array.isArray(s))return false;
+ if(!s.profile||typeof s.profile!=='object'||Array.isArray(s.profile))return false;
+ for(const k of ['sessions','checkins','meals','chat']){
+   if(!Array.isArray(s[k])||s[k].length>10000)return false;
+   if(s[k].some(x=>!x||typeof x!=='object'||Array.isArray(x)))return false;
+ }
+ return true;
+}
+async function getSnapshot(){
+ const r=await pool.query("SELECT revision,snapshot,updated_at FROM pf_state WHERE account_key='principal'");
+ return r.rowCount?{revision:Number(r.rows[0].revision),snapshot:r.rows[0].snapshot,updatedAt:r.rows[0].updated_at}:{revision:0,snapshot:null,updatedAt:null};
+}
+async function updateSnapshot(input){
+ const rev=input.revision;
+ if(!Number.isSafeInteger(rev)||rev<0||!safeSnapshot(input.snapshot))throw Object.assign(Error('Formato o revisión no válidos.'),{status:400});
+ const blob=JSON.stringify(input.snapshot);
+ if(Buffer.byteLength(blob,'utf8')>5*1024*1024)throw Object.assign(Error('El historial supera 5 MB. Exporta tus capturas antes de continuar.'),{status:413});
+ const client=await pool.connect();
+ try{
+   await client.query('BEGIN');
+   await client.query("INSERT INTO pf_state (account_key) VALUES ('principal') ON CONFLICT DO NOTHING");
+   const {rows}=await client.query("SELECT revision FROM pf_state WHERE account_key='principal' FOR UPDATE");
+   if(Number(rows[0].revision)!==rev){await client.query('ROLLBACK');return {conflict:true,revision:Number(rows[0].revision)}}
+   const result=await client.query("UPDATE pf_state SET snapshot=$1::jsonb,revision=revision+1,updated_at=NOW() WHERE account_key='principal' RETURNING revision,updated_at",[blob]);
+   await client.query('COMMIT');
+   return {revision:Number(result.rows[0].revision),updatedAt:result.rows[0].updated_at};
+ }catch(err){try{await client.query('ROLLBACK')}catch{}throw err}finally{client.release()}
+}
+
 // Por seguridad, el destino puede ser la API oficial o un servidor local de pruebas.
 const API_BASE=process.env.OPENAI_API_BASE_URL||'https://api.openai.com';
 if(!(/^https:\/\/api\.openai\.com$/.test(API_BASE)||/^http:\/\/127\.0\.0\.1:\d+$/.test(API_BASE)))throw Error('OPENAI_API_BASE_URL no permitido');
 const MIME={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.json':'application/json; charset=utf-8','.webmanifest':'application/manifest+json','.ico':'image/x-icon'};
 function json(res,status,data){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(data))}
-async function readBody(req){let s='';for await(const chunk of req){s+=chunk;if(s.length>3_500_000)throw Error('Mensaje demasiado grande')}return JSON.parse(s||'{}')}
+async function readBody(req,maxBytes=3_500_000){let size=0,chunks=[];for await(const chunk of req){size+=chunk.length;if(size>maxBytes)throw Object.assign(Error('Mensaje demasiado grande'),{status:413});chunks.push(chunk)}try{return JSON.parse(Buffer.concat(chunks).toString('utf8')||'{}')}catch{throw Object.assign(Error('JSON inválido'),{status:400})}}
 async function readAudio(req){const max=15*1024*1024;let size=0,chunks=[];for await(const part of req){size+=part.length;if(size>max)throw Object.assign(Error('Nota de voz demasiado grande (máximo 15 MB).'),{status:413});chunks.push(part)}if(!size)throw Object.assign(Error('Audio vacío.'),{status:400});return Buffer.concat(chunks)}
 const audioTypes={webm:['audio/webm','.webm'],ogg:['audio/ogg','.ogg'],mp3:['audio/mpeg','.mp3'],mpeg:['audio/mpeg','.mp3'],mp4:['audio/mp4','.m4a'],'x-m4a':['audio/mp4','.m4a'],wav:['audio/wav','.wav'],'x-wav':['audio/wav','.wav'],flac:['audio/flac','.flac'],aac:['audio/aac','.aac']};
 async function transcribe(req){const header=String(req.headers['content-type']||'').toLowerCase().split(';')[0].trim(),match=/^audio\/([a-z0-9-]+)$/.exec(header),format=match?audioTypes[match[1]]:null;if(!format)throw Object.assign(Error('Tipo de audio no compatible. Usa M4A, MP3, WAV, OGG o WebM.'),{status:415});const bytes=await readAudio(req),form=new FormData();form.append('file',new Blob([bytes],{type:format[0]}),'nota-perform'+format[1]);form.append('model',TRANSCRIBE_MODEL);form.append('language','es');form.append('prompt','Entrenamientos de fútbol, Footbar Meteor, RPE, gimnasio, series, repeticiones, pesadez de piernas, recuperación y sueño.');const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),90000);try{const r=await fetch(`${API_BASE}/v1/audio/transcriptions`,{method:'POST',headers:{Authorization:`Bearer ${KEY}`},body:form,signal:controller.signal});const j=await r.json().catch(()=>({}));if(!r.ok)throw Object.assign(Error(j.error?.message||`Error de transcripción (${r.status})`),{status:502});const text=String(j.text||'').trim();if(!text)throw Object.assign(Error('La transcripción está vacía o no pudo reconocerse.'),{status:422});return {text}}finally{clearTimeout(timer)}}
@@ -66,13 +108,24 @@ const server=http.createServer(async(req,res)=>{try{const pathname=new URL(req.u
  if(PRODUCTION)res.setHeader('Strict-Transport-Security','max-age=31536000; includeSubDomains');
  if(pathname==='/healthz'&&req.method==='GET')return json(res,200,{status:'ok'});
  if(!authenticate(req,res))return;
- if(PRODUCTION&&req.method==='POST'&&pathname.startsWith('/api/')){
+ if(PRODUCTION&&['POST','PUT','PATCH','DELETE'].includes(req.method)&&pathname.startsWith('/api/')){
   const origin=String(req.headers.origin||'');
   const host=String(req.headers.host||'');
   if(origin){let originHost='';try{originHost=new URL(origin).host}catch{};if(originHost!==host)return json(res,403,{error:'Origen no autorizado'});}
-  if(!allowAI(req))return json(res,429,{error:'Demasiadas solicitudes de IA. Espera unos minutos.'});
+  if(req.method==='POST'&&!allowAI(req))return json(res,429,{error:'Demasiadas solicitudes de IA. Espera unos minutos.'});
  }
- if(pathname==='/api/health'&&req.method==='GET')return json(res,200,{aiEnabled:Boolean(KEY),transcriptionEnabled:Boolean(KEY),visionEnabled:Boolean(KEY),mode:KEY?'api':'local',model:KEY?MODEL:null});if(pathname.startsWith('/api/')&&req.method==='POST'){
+ if(pathname==='/api/health'&&req.method==='GET')return json(res,200,{aiEnabled:Boolean(KEY),dbEnabled:Boolean(pool),transcriptionEnabled:Boolean(KEY),visionEnabled:Boolean(KEY),mode:KEY?'api':'local',model:KEY?MODEL:null});
+ if(pathname==='/api/data'&&req.method==='GET'){
+   if(!pool)return json(res,503,{error:'Base de datos no configurada.'});
+   return json(res,200,await getSnapshot());
+ }
+ if(pathname==='/api/data'&&req.method==='PUT'){
+   if(!pool)return json(res,503,{error:'Base de datos no configurada.'});
+   if(!String(req.headers['content-type']||'').toLowerCase().startsWith('application/json'))return json(res,415,{error:'Solo JSON.'});
+   const result=await updateSnapshot(await readBody(req,6*1024*1024));
+   return json(res,result.conflict?409:200,result.conflict?{error:'Conflicto: hay datos más recientes en la nube.',revision:result.revision}:result);
+ }
+ if(pathname.startsWith('/api/')&&req.method==='POST'){
  if(!KEY)return json(res,503,{error:'No se ha configurado OPENAI_API_KEY en el servidor. Puedes seguir utilizando el análisis local.'});
  if(pathname==='/api/transcribe'){const out=await transcribe(req);return json(res,200,out)}
  const body=await readBody(req);
@@ -85,6 +138,7 @@ const server=http.createServer(async(req,res)=>{try{const pathname=new URL(req.u
  return json(res,404,{error:'Ruta API no encontrada'});
  }
  if(req.method!=='GET'&&req.method!=='HEAD')return json(res,405,{error:'Método no permitido'});
- const allowed=new Set(['index.html','app.js','styles.css','manifest.webmanifest','sw.js','icon.svg','icon-192.png','icon-512.png']);let filename=pathname==='/'?'index.html':decodeURIComponent(pathname.slice(1));if(!allowed.has(filename))return json(res,404,{error:'Archivo no encontrado'});const file=path.resolve(ROOT,filename);if(!file.startsWith(ROOT+path.sep))return json(res,403,{error:'Acceso no permitido'});const bytes=await fs.readFile(file);res.writeHead(200,{'Content-Type':MIME[path.extname(filename)]||'application/octet-stream','Cache-Control':filename==='index.html'?'no-cache':'public, max-age=600','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'});if(req.method==='GET')res.end(bytes);else res.end();
+ const allowed=new Set(['index.html','app.js','styles.css','manifest.webmanifest','sw.js','icon.svg','icon-192.png','icon-512.png']);let filename=pathname==='/'?'index.html':decodeURIComponent(pathname.slice(1));if(!allowed.has(filename))return json(res,404,{error:'Archivo no encontrado'});const file=path.resolve(ROOT,filename);if(!file.startsWith(ROOT+path.sep))return json(res,403,{error:'Acceso no permitido'});const bytes=await fs.readFile(file);res.writeHead(200,{'Content-Type':MIME[path.extname(filename)]||'application/octet-stream','Cache-Control':PRODUCTION?'no-store':(filename==='index.html'?'no-cache':'public, max-age=600'),'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'});if(req.method==='GET')res.end(bytes);else res.end();
  }catch(error){json(res,error.status|| (error.message==='Mensaje demasiado grande'?413:500),{error:error.message||'Error del servidor'})}});
-server.listen(PORT,HOST,()=>{console.log(`Perform Football abierto en http://${HOST}:${PORT}`);console.log(KEY?'IA externa habilitada (nunca compartas la clave).':'Modo local; para IA con visión, configura OPENAI_API_KEY en un .env local.');console.log('ATENCIÓN: modo online requiere contraseña y aún guarda datos solo en el navegador. No es una versión con sincronización.')});
+await initDatabase();
+server.listen(PORT,HOST,()=>{console.log(`Perform Football abierto en http://${HOST}:${PORT}`);console.log(KEY?'IA externa habilitada (nunca compartas la clave).':'Modo local; para IA con visión, configura OPENAI_API_KEY en un .env local.');console.log(pool?'PostgreSQL conectada; historial online habilitado.':'Sin DATABASE_URL: modo local en navegador.');});

@@ -1,8 +1,16 @@
 {
   "name": "perform-football",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.3.0",
   "type": "module",
-  "scripts": {"start": "node server.mjs", "test": "node --check server.mjs && node --check app.js"},
-  "engines": {"node": ">=20"}
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --check server.mjs && node --check app.js && node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
+  }
 }
