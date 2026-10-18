@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b1119">
+<meta name="description" content="Perform Football: entrenamiento, cargas, recuperación y análisis personalizado.">
+<title>Perform Football · Inteligencia deportiva</title>
+<link rel="icon" type="image/svg+xml" href="./icon.svg">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand"><div class="brand-mark">P<span>F</span><i></i></div><div><strong>PERFORM<span>FOOTBALL</span></strong><small>PERFORMANCE INTELLIGENCE</small></div></div>
+    <div class="side-label">WORKSPACE</div>
+    <nav class="sidenav" id="nav"></nav>
+    <div class="sidebar-bottom"><div class="synccard"><div class="dot"></div><div><b>Datos privados</b><small>Guardados en este dispositivo</small></div></div><button class="profile-link" data-page="settings"><span class="avatar">PF</span><span><b>Mi perfil deportivo</b><small>Configurar y exportar</small></span><span class="chevron">›</span></button></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><div class="topbar-left"><button id="mobile-menu" class="iconbtn menu-btn" aria-label="Abrir menú">☰</button><div class="crumb">PERFORM FOOTBALL <span> / </span> <strong id="page-label">MI PANEL</strong></div></div><div class="topbar-actions"><span class="date-chip" id="today-label"></span><button class="btn btn-outline top-checkin" data-action="checkin">＋ Check-in</button><button class="btn btn-primary" data-action="session">＋ Añadir sesión</button></div></header>
+    <main id="app-content" class="content"></main>
+  </div>
+</div>
+<div class="mobile-tabs" id="mobile-tabs"></div>
+<button class="float-coach" id="float-coach" data-page="assistant" aria-label="Abrir asistente"><span>✦</span> <b>PERFORM AI</b></button>
+<div id="modal-root"></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="./app.js" defer></script>
+</body>
+</html>
